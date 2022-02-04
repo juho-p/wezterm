@@ -10,12 +10,12 @@ use crate::{
     SlavePty,
 };
 use anyhow::{ensure, Context};
-use filedescriptor::FileDescriptor;
+use serial::unix::TTYPort;
 use serial::{
     BaudRate, CharSize, FlowControl, Parity, PortSettings, SerialPort, StopBits, SystemPort,
 };
 use std::ffi::{OsStr, OsString};
-use std::io::{Read, Result as IoResult, Write};
+use std::io::{ErrorKind, Read, Result as IoResult, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -199,7 +199,7 @@ impl MasterPty for Master {
         // We rely on the fact that SystemPort implements the traits
         // that expose the underlying file descriptor, and that direct
         // reads from that return the raw data that we want
-        let fd = FileDescriptor::dup(&*self.port.lock().unwrap())?;
+        let fd = self.port.clone();
         Ok(Box::new(Reader { fd }))
     }
 
@@ -216,21 +216,22 @@ impl MasterPty for Master {
 }
 
 struct Reader {
-    fd: FileDescriptor,
+    fd: Arc<Mutex<TTYPort>>,
 }
 
 impl Read for Reader {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         loop {
-            match self.fd.read(buf) {
+            let res = self.fd.lock().unwrap().read(buf);
+            match res {
                 Ok(size) => {
                     if size == 0 {
-                        // Read timeout, but we expect to mostly hit this.
-                        // It just means that there was no data available
-                        // right now.
                         continue;
                     }
                     return Ok(size);
+                }
+                Err(e) if e.kind() == ErrorKind::TimedOut => {
+                    continue;
                 }
                 Err(e) => {
                     log::error!("serial read error: {}", e);
